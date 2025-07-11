@@ -1,0 +1,79 @@
+from flask import Flask, render_template, Response
+import cv2
+import math
+import json
+from ultralytics import YOLO
+from queue import Queue
+from threading import Thread
+
+app = Flask(__name__)
+model = YOLO('C:/Users/Mathan/Downloads/moni_mini/moni_mini/best (5).pt')
+classnames = ['bead_damage', 'crack', 'debris', 'ground', 'normal', 'outside_sidewallcut', 'side', 'side_cut']
+output_queue = Queue()
+
+def detect_objects():
+    cap = cv2.VideoCapture(0)
+
+    while True:
+        ret, frame = cap.read()
+        frame = cv2.resize(frame, (640, 480))
+
+        # Run YOLO model
+        result = model(frame, stream=True)
+
+        detected_classes = []
+
+        for info in result:
+            boxes = info.boxes
+            for box in boxes:
+                confidence = box.conf[0]
+                confidence = math.ceil(confidence * 100)
+                class_index = int(box.cls[0])
+
+                if confidence > 50 and class_index < len(classnames):
+                    x1, y1, x2, y2 = box.xyxy[0]
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 5)
+                    cv2.putText(frame, f'{classnames[class_index]} {confidence}%', (x1 + 8, y1 + 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    
+                    detected_classes.append(classnames[class_index])
+
+        ret, buffer = cv2.imencode('.jpg', frame)
+        frame = buffer.tobytes()
+
+        # Add detected classes to the output queue
+        output_queue.put(detected_classes)
+
+        # Yield frame for video feed
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+
+    cap.release()
+
+@app.route('/')
+def index():
+    return render_template('index.html', classnames=classnames)
+
+@app.route('/video_feed')
+def video_feed():
+    return Response(detect_objects(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/output')
+def output():
+    # Continuously read from the output queue and send data to the client
+    def generate():
+        while True:
+            detected_classes = output_queue.get()
+            yield json.dumps(detected_classes) + '\n'
+
+    return Response(generate(), mimetype='text/plain')
+
+if __name__ == '__main__':
+    # Start the object detection thread
+    object_detection_thread = Thread(target=detect_objects)
+    object_detection_thread.daemon = True
+    object_detection_thread.start()
+
+    app.run(debug=True)
